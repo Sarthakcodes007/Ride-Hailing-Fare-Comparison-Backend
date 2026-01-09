@@ -19,12 +19,61 @@ interface MapViewProps {
 
 export const MapView: React.FC<MapViewProps> = ({ pickup, drop, busPath, busSegments }) => {
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
+  const mapRef = React.useRef<google.maps.Map | null>(null);
+
+  const onLoad = React.useCallback((map: google.maps.Map) => {
+    mapRef.current = map;
+  }, []);
+
+  const onUnmount = React.useCallback(() => {
+    mapRef.current = null;
+  }, []);
 
   const center = useMemo(() => {
     if (pickup) return pickup;
     if (drop) return drop;
     return { lat: 12.9716, lng: 77.5946 }; // Default Bangalore
   }, [pickup, drop]);
+
+  // Fit bounds when route or points change
+  useEffect(() => {
+    if (mapRef.current && window.google) {
+        const bounds = new window.google.maps.LatLngBounds();
+        let hasPoints = false;
+
+        if (pickup) {
+            bounds.extend(pickup);
+            hasPoints = true;
+        }
+        if (drop) {
+            bounds.extend(drop);
+            hasPoints = true;
+        }
+
+        if (busSegments) {
+            busSegments.forEach(seg => {
+                if (seg.path && seg.path.length > 0) {
+                    seg.path.forEach(p => bounds.extend(p));
+                    hasPoints = true;
+                } else if (seg.start && seg.end) {
+                    bounds.extend(seg.start);
+                    bounds.extend(seg.end);
+                    hasPoints = true;
+                }
+            });
+        } else if (busPath) {
+             busPath.forEach(p => bounds.extend({ lat: p.lat, lng: p.lng }));
+             hasPoints = true;
+        } else if (directions && directions.routes[0] && directions.routes[0].bounds) {
+             mapRef.current.fitBounds(directions.routes[0].bounds);
+             return; // Directions service handles bounds
+        }
+
+        if (hasPoints) {
+            mapRef.current.fitBounds(bounds);
+        }
+    }
+  }, [pickup, drop, busSegments, busPath, directions]);
 
   useEffect(() => {
     if (pickup && drop && !busPath && !busSegments) {

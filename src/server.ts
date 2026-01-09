@@ -69,6 +69,10 @@ app.post('/api/bus-routes', async (req, res) => {
   }
 });
 
+app.get('/', (req, res) => {
+  res.send('Backend Server is Running! 🚀<br>Please open the frontend application (usually at http://localhost:5173) to use the app.');
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
