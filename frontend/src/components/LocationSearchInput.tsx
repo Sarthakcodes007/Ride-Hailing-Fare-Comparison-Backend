@@ -28,12 +28,12 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
     clearSuggestions,
   } = usePlacesAutocomplete({
     requestOptions: {
-      /* Define search scope here if needed, e.g., bounds around Bangalore */
+      /* Define search scope here if needed, e.g., bounds around New Delhi */
       locationBias: {
-        north: 13.5,
-        south: 12.4,
-        east: 78.1,
-        west: 77.0
+        north: 28.9,
+        south: 28.4,
+        east: 77.35,
+        west: 76.8
       }
     },
     debounce: 300,

@@ -32,7 +32,7 @@ export const MapView: React.FC<MapViewProps> = ({ pickup, drop, busPath, busSegm
   const center = useMemo(() => {
     if (pickup) return pickup;
     if (drop) return drop;
-    return { lat: 12.9716, lng: 77.5946 }; // Default Bangalore
+    return { lat: 28.6139, lng: 77.2090 }; // Default New Delhi
   }, [pickup, drop]);
 
   // Fit bounds when route or points change

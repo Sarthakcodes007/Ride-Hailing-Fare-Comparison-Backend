@@ -9,6 +9,15 @@ export const MapWrapper = ({ children }: { children: React.ReactNode }) => {
     libraries,
   });
 
+  React.useEffect(() => {
+    if (loadError) {
+      console.error("Google Maps Load Error:", loadError);
+    }
+    if (isLoaded) {
+      console.log("Google Maps API Loaded Successfully");
+    }
+  }, [isLoaded, loadError]);
+
   if (loadError) return <div className="p-4 bg-red-100 text-red-700 rounded-md">Error loading Maps: {loadError.message}</div>;
   if (!isLoaded) return <div className="p-4 text-center text-gray-500">Loading Maps...</div>;
 
