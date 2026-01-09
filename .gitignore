@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Environment variables
+.env
+client/.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+client/dist/
+
+# Session/Cookie data (Sensitive)
+cookies/
+
+# Large Data Files (>100MB)
+bus routing/fare_attributes.csv
+bus routing/stop_times.csv
+
+# OS generated files
+.DS_Store
+Thumbs.db
