@@ -10,7 +10,7 @@ yarn-debug.log*
 yarn-error.log*
 dist/
 client/dist/
-/__pycache__/
+__pycache__/
 cookies/
 bus routing/fare_attributes.csv
 bus routing/stop_times.csv
