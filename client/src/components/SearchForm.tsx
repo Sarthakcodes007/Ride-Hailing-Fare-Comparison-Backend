@@ -112,7 +112,7 @@ export const SearchForm: React.FC<SearchFormProps> = ({ onSearch, onPickupChange
             ) : (
             <>
                 <Search size={20} />
-                {activeTab === 'bus' ? 'Find Bus Routes' : 'Compare Prices'}
+                {activeTab === 'bus' ? 'Bus Routes' : 'Compare Prices'}
             </>
             )}
         </button>

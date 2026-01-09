@@ -66,6 +66,11 @@ export class BusService {
   private stopTimesByTripId: Map<string, StopTime[]> = new Map();
   private trips: Map<string, Trip> = new Map();
   private routes: Map<string, Route> = new Map();
+  
+  // Optimized Indices
+  private routesByStop: Map<string, Set<string>> = new Map(); // StopID -> Set<RouteID>
+  private stopsByRoute: Map<string, string[]> = new Map(); // RouteID -> List<StopID> (Ordered)
+
   private isLoaded = false;
 
   private readonly GTFS_PATH = path.join(process.cwd(), 'bus routing');
@@ -122,6 +127,17 @@ export class BusService {
       // Load StopTimes (Optimized Indexing)
       console.log('[BusService] Indexing StopTimes...');
       const stopTimesData = loadCsv(stopTimesPath);
+      
+      // Temporary map to build stopsByRoute efficiently
+      const routeSampleTrip = new Map<string, string>(); // RouteID -> TripID
+      tripsData.forEach((t: any) => {
+          if (!routeSampleTrip.has(t.route_id)) {
+              routeSampleTrip.set(t.route_id, t.trip_id);
+          }
+      });
+
+      const tempStopsByTrip = new Map<string, {seq: number, stop_id: string}[]>();
+
       stopTimesData.forEach((s: any) => {
         const st: StopTime = {
           ...s,
@@ -139,10 +155,38 @@ export class BusService {
             this.stopTimesByTripId.set(st.trip_id, []);
         }
         this.stopTimesByTripId.get(st.trip_id)?.push(st);
+
+        // Build RoutesByStop
+        const trip = this.trips.get(st.trip_id);
+        if (trip) {
+            if (!this.routesByStop.has(st.stop_id)) {
+                this.routesByStop.set(st.stop_id, new Set());
+            }
+            this.routesByStop.get(st.stop_id)?.add(trip.route_id);
+        }
+
+        // Build Temp StopsByTrip (only for sample trips)
+        // This is an optimization to avoid storing every trip's full path
+        // But we need to check if this trip is a sample trip
+        // Checking map for every row is fast enough
+      });
+
+      // Build StopsByRoute from sample trips
+      // We iterate trips because we need the full sequence
+      // Actually, we can just iterate stopTimesByTripId for the sample trips
+      routeSampleTrip.forEach((tripId, routeId) => {
+          const tripStops = this.stopTimesByTripId.get(tripId);
+          if (tripStops) {
+              const sortedStops = tripStops
+                  .sort((a, b) => a.stop_sequence - b.stop_sequence)
+                  .map(st => st.stop_id);
+              this.stopsByRoute.set(routeId, sortedStops);
+          }
       });
 
       this.isLoaded = true;
       console.log(`[BusService] Loaded ${this.stops.size} stops, ${stopTimesData.length} stop_times, ${this.trips.size} trips.`);
+      console.log(`[BusService] Indexed ${this.routesByStop.size} stops with routes and ${this.stopsByRoute.size} unique route paths.`);
 
     } catch (error) {
       console.error('[BusService] Error loading GTFS data:', error);
@@ -150,24 +194,36 @@ export class BusService {
   }
 
   public findRoutes(pickup: GeoLocation, drop: GeoLocation): BusRouteResult[] {
-    if (!this.isLoaded) return [];
+    if (!this.isLoaded) {
+        console.log('[BusService] Data not loaded yet.');
+        return [];
+    }
+
+    console.log(`[BusService] Finding routes from ${pickup.lat},${pickup.lng} to ${drop.lat},${drop.lng}`);
 
     // 1. Find nearest stops to pickup and drop
     const nearbyPickupStops = this.findNearbyStopsWithDistance(pickup);
     const nearbyDropStops = this.findNearbyStopsWithDistance(drop);
 
+    console.log(`[BusService] Found ${nearbyPickupStops.length} nearby pickup stops and ${nearbyDropStops.length} nearby drop stops.`);
+
     if (nearbyPickupStops.length === 0 || nearbyDropStops.length === 0) {
+        console.log('[BusService] No nearby stops found within range.');
       return [];
     }
 
     // 2. Find Direct Routes
+    console.log('[BusService] Searching for direct routes...');
     const directRoutes = this.findDirectRoutes(pickup, drop, nearbyPickupStops, nearbyDropStops);
+    console.log(`[BusService] Found ${directRoutes.length} direct routes.`);
     
     // 3. Find Transfer Routes (1-hop)
     // Only look for transfers if we don't have enough direct routes
     let transferRoutes: BusRouteResult[] = [];
     if (directRoutes.length < 5) {
+        console.log('[BusService] Searching for transfer routes...');
         transferRoutes = this.findTransferRoutes(pickup, drop, nearbyPickupStops, nearbyDropStops);
+        console.log(`[BusService] Found ${transferRoutes.length} transfer routes.`);
     }
 
     const allRoutes = [...directRoutes, ...transferRoutes];
@@ -188,44 +244,97 @@ export class BusService {
     const results: BusRouteResult[] = [];
     const seenRoutes = new Set<string>();
 
-    for (const pStopItem of pStops) {
-      const pStop = pStopItem.stop;
-      const pStopTimes = this.stopTimesByStopId.get(pStop.stop_id) || [];
+    // 1. Identify Routes at Pickup and Drop
+    const pRoutesMap = new Map<string, { stop: Stop, distance: number }[]>(); // RouteID -> List of Pickup Stops serving it
+    const dRoutesMap = new Map<string, { stop: Stop, distance: number }[]>(); // RouteID -> List of Drop Stops serving it
 
-      for (const pSt of pStopTimes) {
-        const tripId = pSt.trip_id;
-        const tripStopTimes = this.stopTimesByTripId.get(tripId);
-        if (!tripStopTimes) continue;
-        
-        const dSt = tripStopTimes.find(st => 
-             dStops.some(ds => ds.stop.stop_id === st.stop_id) && 
-             st.stop_sequence > pSt.stop_sequence
-        );
-
-        if (dSt) {
-          const trip = this.trips.get(tripId);
-          const route = trip ? this.routes.get(trip.route_id) : undefined;
-          const dropStopItem = dStops.find(ds => ds.stop.stop_id === dSt.stop_id);
-
-          if (trip && route && dropStopItem) {
-             const routeName = route.route_short_name || route.route_long_name;
-             const uniqueKey = `${routeName}-${pStop.stop_name}-${dropStopItem.stop.stop_name}`;
-             
-             if (!seenRoutes.has(uniqueKey)) {
-                const result = this.buildRouteResult(
-                    pickup, drop, pStopItem, dropStopItem, 
-                    trip, route, pSt, dSt, tripStopTimes, 
-                    routeName
-                );
-                results.push(result);
-                seenRoutes.add(uniqueKey);
-             }
-          }
+    for (const p of pStops) {
+        const routes = this.routesByStop.get(p.stop.stop_id);
+        if (routes) {
+            routes.forEach(rId => {
+                if (!pRoutesMap.has(rId)) pRoutesMap.set(rId, []);
+                pRoutesMap.get(rId)?.push(p);
+            });
         }
-        if (results.length >= 5) break; 
-      }
-      if (results.length >= 5) break;
     }
+
+    for (const d of dStops) {
+        const routes = this.routesByStop.get(d.stop.stop_id);
+        if (routes) {
+            routes.forEach(rId => {
+                if (!dRoutesMap.has(rId)) dRoutesMap.set(rId, []);
+                dRoutesMap.get(rId)?.push(d);
+            });
+        }
+    }
+
+    // 2. Intersect Routes
+    const commonRouteIds = [...pRoutesMap.keys()].filter(rId => dRoutesMap.has(rId));
+    console.log(`[BusService] Found ${commonRouteIds.length} common routes directly connecting areas.`);
+
+    for (const routeId of commonRouteIds) {
+        const routeStops = this.stopsByRoute.get(routeId);
+        if (!routeStops) continue;
+
+        const potentialPStops = pRoutesMap.get(routeId) || [];
+        const potentialDStops = dRoutesMap.get(routeId) || [];
+
+        for (const pStopItem of potentialPStops) {
+            for (const dStopItem of potentialDStops) {
+                const pIndex = routeStops.indexOf(pStopItem.stop.stop_id);
+                const dIndex = routeStops.indexOf(dStopItem.stop.stop_id);
+
+                if (pIndex !== -1 && dIndex !== -1 && pIndex < dIndex) {
+                    // Valid Direction!
+                    // Find a trip for this route
+                    const route = this.routes.get(routeId);
+                    if (!route) continue;
+
+                    // Find a valid trip (simplified: just take the first one that works, or search for time)
+                    // Better: Look up trips for this route and find one with valid times
+                    // For now, we search stopTimesByStopId for pStop, filter by route, check dStop
+                    
+                    const pStopTimes = this.stopTimesByStopId.get(pStopItem.stop.stop_id);
+                    if (!pStopTimes) continue;
+
+                    // Filter for trips on this route
+                    const validTrip = pStopTimes.find(st => {
+                        const trip = this.trips.get(st.trip_id);
+                        if (trip && trip.route_id === routeId) {
+                            // Verify this trip actually goes to dStop after pStop
+                            // (Some trips might be partial)
+                            const tripStops = this.stopTimesByTripId.get(st.trip_id);
+                            return tripStops?.some(ts => ts.stop_id === dStopItem.stop.stop_id && ts.stop_sequence > st.stop_sequence);
+                        }
+                        return false;
+                    });
+
+                    if (validTrip) {
+                        const trip = this.trips.get(validTrip.trip_id);
+                        const tripStops = this.stopTimesByTripId.get(validTrip.trip_id);
+                        const dSt = tripStops?.find(ts => ts.stop_id === dStopItem.stop.stop_id);
+
+                        if (trip && tripStops && dSt) {
+                            const routeName = route.route_short_name || route.route_long_name;
+                            const uniqueKey = `${routeName}-${pStopItem.stop.stop_name}-${dStopItem.stop.stop_name}`;
+                            
+                            if (!seenRoutes.has(uniqueKey)) {
+                                console.log(`[BusService] Found Direct Route: ${routeName}`);
+                                results.push(this.buildRouteResult(
+                                    pickup, drop, pStopItem, dStopItem,
+                                    trip, route, validTrip, dSt, tripStops, routeName
+                                ));
+                                seenRoutes.add(uniqueKey);
+                            }
+                        }
+                    }
+                }
+            }
+            if (results.length >= 5) break;
+        }
+        if (results.length >= 5) break;
+    }
+
     return results;
   }
 
@@ -236,94 +345,171 @@ export class BusService {
     dStops: { stop: Stop, distance: number }[]
   ): BusRouteResult[] {
     const results: BusRouteResult[] = [];
-    // Limit complexity: take top 3 stops
-    const topPStops = pStops.slice(0, 3);
-    const topDStops = dStops.slice(0, 3);
+    const seenRoutes = new Set<string>();
 
-    // Map: TransferStopId -> List of FirstLegs { trip, pStop, tStop, arrival }
-    const firstLegs = new Map<string, any[]>();
+    // 1. Identify Routes
+    // Use top 5 stops to increase coverage
+    const pRoutesMap = new Map<string, { stop: Stop, distance: number }>(); 
+    const dRoutesMap = new Map<string, { stop: Stop, distance: number }>();
 
-    // 1. Build First Legs (Pickup -> Transfer)
-    for (const pStopItem of topPStops) {
-        const pStop = pStopItem.stop;
-        const pStopTimes = this.stopTimesByStopId.get(pStop.stop_id) || [];
-        
-        // Limit to reasonable number of trips to check (e.g. next 20)
-        // ideally filter by time, but for now just take first few valid ones
-        for (const pSt of pStopTimes.slice(0, 50)) { 
-            const tripStopTimes = this.stopTimesByTripId.get(pSt.trip_id);
-            if (!tripStopTimes) continue;
+    for (const p of pStops.slice(0, 5)) {
+        const routes = this.routesByStop.get(p.stop.stop_id);
+        if (routes) routes.forEach(rId => {
+            if (!pRoutesMap.has(rId)) pRoutesMap.set(rId, p); // Store closest stop for this route
+        });
+    }
 
-            // Find all potential transfer stops (stops after pStop)
-            for (const tSt of tripStopTimes) {
-                if (tSt.stop_sequence > pSt.stop_sequence) {
-                    if (!firstLegs.has(tSt.stop_id)) {
-                        firstLegs.set(tSt.stop_id, []);
-                    }
-                    firstLegs.get(tSt.stop_id)?.push({
-                        trip: this.trips.get(pSt.trip_id),
-                        route: this.routes.get(this.trips.get(pSt.trip_id)?.route_id || ''),
-                        pStopItem,
-                        pSt,
-                        tSt,
-                        tripStopTimes
-                    });
-                }
+    for (const d of dStops.slice(0, 5)) {
+        const routes = this.routesByStop.get(d.stop.stop_id);
+        if (routes) routes.forEach(rId => {
+            if (!dRoutesMap.has(rId)) dRoutesMap.set(rId, d);
+        });
+    }
+
+    const pRouteIds = [...pRoutesMap.keys()];
+    const dRouteIds = [...dRoutesMap.keys()];
+    
+    console.log(`[BusService] Checking transfers between ${pRouteIds.length} pickup routes and ${dRouteIds.length} drop routes.`);
+
+    // 2. Find Connections
+    // Optimization: Don't compare all pairs. 
+    // Iterate pRoutes, get their stops. Iterate dRoutes, get their stops. Intersect.
+    
+    // Reverse Map: StopID -> List<DropRouteID>
+    // To quickly check if a stop on pRoute connects to any dRoute
+    const stopsToDropRoutes = new Map<string, string[]>();
+    for (const rId of dRouteIds) {
+        const stops = this.stopsByRoute.get(rId);
+        if (stops) {
+            for (const sId of stops) {
+                if (!stopsToDropRoutes.has(sId)) stopsToDropRoutes.set(sId, []);
+                stopsToDropRoutes.get(sId)?.push(rId);
             }
         }
     }
 
-    // 2. Find Second Legs (Transfer -> Drop) and Match
-    let foundCount = 0;
-    for (const dStopItem of topDStops) {
-        const dStop = dStopItem.stop;
-        const dStopTimes = this.stopTimesByStopId.get(dStop.stop_id) || [];
+    let checks = 0;
+    
+    for (const pRouteId of pRouteIds) {
+        const pRouteStops = this.stopsByRoute.get(pRouteId);
+        if (!pRouteStops) continue;
+        
+        const pStopItem = pRoutesMap.get(pRouteId)!;
+        const pStartIndex = pRouteStops.indexOf(pStopItem.stop.stop_id);
+        if (pStartIndex === -1) continue;
 
-        for (const dSt of dStopTimes.slice(0, 50)) {
-            const tripStopTimes = this.stopTimesByTripId.get(dSt.trip_id);
-            if (!tripStopTimes) continue;
+        // Check stops AFTER start index for transfer possibilities
+        for (let i = pStartIndex + 1; i < pRouteStops.length; i++) {
+            const transferStopId = pRouteStops[i];
+            const connectingDropRoutes = stopsToDropRoutes.get(transferStopId);
 
-            // Check stops BEFORE dStop for potential transfer match
-            for (const tSt2 of tripStopTimes) {
-                if (tSt2.stop_sequence < dSt.stop_sequence) {
-                    const potentialFirstLegs = firstLegs.get(tSt2.stop_id);
+            if (connectingDropRoutes) {
+                for (const dRouteId of connectingDropRoutes) {
+                    const dRouteStops = this.stopsByRoute.get(dRouteId);
+                    const dStopItem = dRoutesMap.get(dRouteId)!;
                     
-                    if (potentialFirstLegs) {
-                        for (const leg1 of potentialFirstLegs) {
-                            // Check Timing: leg1.arrival < leg2.departure
-                            const arrival1 = this.parseTime(leg1.tSt.arrival_time);
-                            const depart2 = this.parseTime(tSt2.departure_time);
+                    if (dRouteStops) {
+                        const transferIndexInLeg2 = dRouteStops.indexOf(transferStopId);
+                        const dropIndexInLeg2 = dRouteStops.indexOf(dStopItem.stop.stop_id);
+
+                        if (transferIndexInLeg2 !== -1 && dropIndexInLeg2 !== -1 && transferIndexInLeg2 < dropIndexInLeg2) {
+                            // FOUND A PATH: pStop -> (pRoute) -> Transfer -> (dRoute) -> dStop
+                            // Now find actual trips
                             
-                            // Allow min 2 mins, max 60 mins transfer buffer
-                            if (depart2 > arrival1 + 120 && depart2 < arrival1 + 3600) {
-                                // Found a valid transfer!
-                                const trip2 = this.trips.get(dSt.trip_id);
-                                const route2 = this.routes.get(trip2?.route_id || '');
+                            const uniqueKey = `${pRouteId}-${transferStopId}-${dRouteId}`;
+                            if (seenRoutes.has(uniqueKey)) continue;
+
+                            const transferStop = this.stops.get(transferStopId);
+                            if (!transferStop) continue;
+
+                            // Find Trip 1
+                            const trip1Info = this.findTripForLeg(pRouteId, pStopItem.stop.stop_id, transferStopId);
+                            if (!trip1Info) continue;
+
+                            // Find Trip 2 (After Trip 1 arrives)
+                            // For simplicity, just find ANY trip for Leg 2 for now, or one that departs after arrival
+                            const trip2Info = this.findTripForLeg(dRouteId, transferStopId, dStopItem.stop.stop_id);
+                            // Real implementation should check time: trip2.dep > trip1.arr
+                            
+                            if (trip2Info) {
+                                // Basic Time Check
+                                const arr1 = this.parseTime(trip1Info.end.arrival_time);
+                                const dep2 = this.parseTime(trip2Info.start.departure_time);
                                 
-                                if (trip2 && route2) {
-                                    const result = this.buildTransferRouteResult(
-                                        pickup, drop, 
-                                        leg1.pStopItem, dStopItem, 
-                                        leg1.trip, leg1.route, 
-                                        trip2, route2,
-                                        leg1.pSt, leg1.tSt, // Leg 1 start/end
-                                        tSt2, dSt,          // Leg 2 start/end
-                                        leg1.tripStopTimes, tripStopTimes,
-                                        this.stops.get(tSt2.stop_id) // Transfer Stop
-                                    );
-                                    results.push(result);
-                                    foundCount++;
-                                    if (foundCount >= 3) return results;
+                                // If trip2 departs before trip1 arrives, we need a later trip2
+                                // This requires a proper time-based search which is complex.
+                                // For MVP/Mock, we can just assume frequency and adjust time, OR try to find a better trip.
+                                // Let's just output it if it's loosely plausible or just show it.
+                                // Actually, let's try to find a later trip if needed.
+                                
+                                if (dep2 < arr1) {
+                                     // This specific pair doesn't work time-wise.
+                                     // But the ROUTE is valid.
+                                     // In a real app, we'd query: Get next trip for route2 at stop T after time X.
+                                     // Let's just use these trips and accept negative transfer time (and fix it visually or skip)
+                                     // Better: Skip if negative.
+                                     continue; 
                                 }
+
+                                const route1 = this.routes.get(pRouteId)!;
+                                const route2 = this.routes.get(dRouteId)!;
+                                
+                                console.log(`[BusService] Found Transfer Route: ${route1.route_short_name} -> ${route2.route_short_name} via ${transferStop.stop_name}`);
+                                
+                                results.push(this.buildTransferRouteResult(
+                                    pickup, drop,
+                                    pStopItem, dStopItem,
+                                    trip1Info.trip, route1,
+                                    trip2Info.trip, route2,
+                                    trip1Info.start, trip1Info.end,
+                                    trip2Info.start, trip2Info.end,
+                                    trip1Info.stops, trip2Info.stops,
+                                    transferStop
+                                ));
+                                seenRoutes.add(uniqueKey);
+                                if (results.length >= 5) return results;
                             }
                         }
                     }
                 }
             }
         }
+        if (results.length >= 5) break;
     }
-
+    
     return results;
+  }
+
+  private findTripForLeg(routeId: string, startStopId: string, endStopId: string): { trip: Trip, start: StopTime, end: StopTime, stops: StopTime[] } | null {
+      // Find a trip on this route that stops at start and end (in that order)
+      // We can iterate trips for this route.
+      // Optimization: We know sample trip has them. We need a REAL trip.
+      
+      // Get all trips for route
+      // Iterate them?
+      // Since we don't have a direct "TripsByRoute" list (only map), we can iterate stopTimesByStopId(startStopId) and filter by route.
+      
+      const startStopTimes = this.stopTimesByStopId.get(startStopId);
+      if (!startStopTimes) return null;
+
+      for (const st of startStopTimes) {
+          const trip = this.trips.get(st.trip_id);
+          if (trip && trip.route_id === routeId) {
+              const tripStops = this.stopTimesByTripId.get(st.trip_id);
+              if (tripStops) {
+                  const endSt = tripStops.find(s => s.stop_id === endStopId && s.stop_sequence > st.stop_sequence);
+                  if (endSt) {
+                      return {
+                          trip,
+                          start: st,
+                          end: endSt,
+                          stops: tripStops
+                      };
+                  }
+              }
+          }
+      }
+      return null;
   }
 
   private parseTime(timeStr: string): number {

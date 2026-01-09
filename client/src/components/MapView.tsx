@@ -58,6 +58,8 @@ export const MapView: React.FC<MapViewProps> = ({ pickup, drop, busPath, busSegm
         center={center}
         mapContainerClassName="w-full h-full"
         options={mapOptions}
+        onLoad={onLoad}
+        onUnmount={onUnmount}
       >
         {pickup && <Marker position={pickup} label="P" title="Pickup" />}
         {drop && <Marker position={drop} label="D" title="Drop" />}
